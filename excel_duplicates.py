@@ -199,80 +199,115 @@ def detect_duplicate_scenarios(
         6: "国家与名称不一致，网址一致",
     }
 
-    # 初始化备注列
-    notes = []
+    # 预处理：标准化数据（处理NaN和空格）- 使用向量化操作
+    # 直接在df上操作，避免不必要的复制
+    df["_country_norm"] = df[country_col].fillna("").astype(str).str.strip()
+    df["_company_norm"] = df[company_col].fillna("").astype(str).str.strip()
+    df["_website_norm"] = df[website_col].fillna("").astype(str).str.strip()
 
-    # 逐行比较
-    for idx in range(len(df)):
-        current_row = df.iloc[idx]
-        current_country = current_row[country_col]
-        current_company = current_row[company_col]
-        current_website = current_row[website_col]
+    # 使用numpy数组存储场景标记（位标记：场景1=1, 场景2=2, 场景3=4, 场景4=8, 场景5=16, 场景6=32）
+    import numpy as np
+    scenario_flags = np.zeros(len(df), dtype=np.int32)
 
-        # 收集当前行匹配的所有场景
-        matched_scenarios = set()
+    # 场景1：国家相同 && 企业名称相同 && 网址相同
+    # 使用transform批量标记，避免循环
+    key_cols = ["_country_norm", "_company_norm", "_website_norm"]
+    grouped = df.groupby(key_cols, dropna=False, sort=False)
+    # 使用transform将组大小映射到每行
+    df["_size_1"] = grouped["_country_norm"].transform("size")
+    scenario_flags |= ((df["_size_1"] > 1).astype(np.int32) * 1)
 
-        # 与其他所有行比较
-        for other_idx in range(len(df)):
-            if idx == other_idx:
-                continue  # 跳过自己
+    # 场景2：国家相同 && 企业名称相同 && 网址不同
+    key_cols = ["_country_norm", "_company_norm"]
+    grouped = df.groupby(key_cols, dropna=False, sort=False)
+    df["_size_2"] = grouped["_country_norm"].transform("size")
+    df["_website_nunique_2"] = grouped["_website_norm"].transform("nunique")
+    scenario_flags |= ((df["_size_2"] > 1) & (df["_website_nunique_2"] > 1)).astype(np.int32) * 2
 
-            other_row = df.iloc[other_idx]
-            other_country = other_row[country_col]
-            other_company = other_row[company_col]
-            other_website = other_row[website_col]
+    # 场景3：国家相同 && 企业名称不同 && 网址相同
+    key_cols = ["_country_norm", "_website_norm"]
+    grouped = df.groupby(key_cols, dropna=False, sort=False)
+    df["_size_3"] = grouped["_country_norm"].transform("size")
+    df["_company_nunique_3"] = grouped["_company_norm"].transform("nunique")
+    scenario_flags |= ((df["_size_3"] > 1) & (df["_company_nunique_3"] > 1)).astype(np.int32) * 4
 
-            # 判断是否相同（处理NaN值）
-            country_same = pd.isna(current_country) and pd.isna(other_country) or (
-                not pd.isna(current_country)
-                and not pd.isna(other_country)
-                and str(current_country).strip() == str(other_country).strip()
-            )
-            company_same = pd.isna(current_company) and pd.isna(other_company) or (
-                not pd.isna(current_company)
-                and not pd.isna(other_company)
-                and str(current_company).strip() == str(other_company).strip()
-            )
-            website_same = pd.isna(current_website) and pd.isna(other_website) or (
-                not pd.isna(current_website)
-                and not pd.isna(other_website)
-                and str(current_website).strip() == str(other_website).strip()
-            )
+    # 场景4：国家不同 && 企业名称相同 && 网址相同
+    key_cols = ["_company_norm", "_website_norm"]
+    grouped = df.groupby(key_cols, dropna=False, sort=False)
+    df["_size_4"] = grouped["_company_norm"].transform("size")
+    df["_country_nunique_4"] = grouped["_country_norm"].transform("nunique")
+    scenario_flags |= ((df["_size_4"] > 1) & (df["_country_nunique_4"] > 1)).astype(np.int32) * 8
 
-            # 检测6种场景
-            if country_same and company_same and website_same:
-                matched_scenarios.add(1)
-            elif country_same and company_same and not website_same:
-                matched_scenarios.add(2)
-            elif country_same and not company_same and website_same:
-                matched_scenarios.add(3)
-            elif not country_same and company_same and website_same:
-                matched_scenarios.add(4)
-            elif not country_same and company_same and not website_same:
-                matched_scenarios.add(5)
-            elif not country_same and not company_same and website_same:
-                matched_scenarios.add(6)
+    # 场景5：国家不同 && 企业名称相同 && 网址不同
+    key_cols = ["_company_norm"]
+    grouped = df.groupby(key_cols, dropna=False, sort=False)
+    df["_size_5"] = grouped["_company_norm"].transform("size")
+    df["_country_nunique_5"] = grouped["_country_norm"].transform("nunique")
+    df["_website_nunique_5"] = grouped["_website_norm"].transform("nunique")
+    scenario_flags |= ((df["_size_5"] > 1) & (df["_country_nunique_5"] > 1) & (df["_website_nunique_5"] > 1)).astype(np.int32) * 16
 
-        # 生成备注
-        if matched_scenarios:
-            # 按场景编号排序，确保输出顺序一致
-            sorted_scenarios = sorted(matched_scenarios)
-            note_text = scenario_separator.join(
-                [scenario_descriptions[s] for s in sorted_scenarios]
-            )
-        else:
-            note_text = "无重复"
+    # 场景6：国家不同 && 企业名称不同 && 网址相同
+    key_cols = ["_website_norm"]
+    grouped = df.groupby(key_cols, dropna=False, sort=False)
+    df["_size_6"] = grouped["_website_norm"].transform("size")
+    df["_country_nunique_6"] = grouped["_country_norm"].transform("nunique")
+    df["_company_nunique_6"] = grouped["_company_norm"].transform("nunique")
+    scenario_flags |= ((df["_size_6"] > 1) & (df["_country_nunique_6"] > 1) & (df["_company_nunique_6"] > 1)).astype(np.int32) * 32
 
-        notes.append(note_text)
+    # 清理临时列
+    temp_cols = [
+        "_country_norm", "_company_norm", "_website_norm",
+        "_size_1", "_size_2", "_website_nunique_2", "_size_3", "_company_nunique_3",
+        "_size_4", "_country_nunique_4", "_size_5", "_country_nunique_5", "_website_nunique_5",
+        "_size_6", "_country_nunique_6", "_company_nunique_6"
+    ]
+    df.drop(columns=temp_cols, errors="ignore", inplace=True)
+
+    # 预编译场景描述映射和位标记
+    scenario_bits = np.array([1, 2, 4, 8, 16, 32], dtype=np.int32)
+    scenario_nums = np.array([1, 2, 3, 4, 5, 6], dtype=np.int32)
+    
+    # 使用向量化操作生成备注（优化字符串生成）
+    # 预编译所有可能的备注组合（最多63种组合：2^6-1）
+    note_cache = {}
+    note_cache[0] = "无重复"
+    
+    def flags_to_note(flag):
+        """将标志位转换为备注文本（带缓存，使用numpy加速）"""
+        if flag in note_cache:
+            return note_cache[flag]
+        if flag == 0:
+            return "无重复"
+        # 使用numpy位运算提取被标记的场景编号（向量化）
+        matched = scenario_nums[scenario_bits & flag != 0]
+        if len(matched) > 0:
+            # 排序并生成备注文本
+            matched_sorted = np.sort(matched)
+            note_text = scenario_separator.join([scenario_descriptions[int(s)] for s in matched_sorted])
+            note_cache[flag] = note_text
+            return note_text
+        return "无重复"
+    
+    # 优化：先预编译所有唯一的标志值，然后批量生成备注
+    # 这样可以最大化缓存命中率
+    unique_flags = np.unique(scenario_flags)
+    for flag in unique_flags:
+        if flag not in note_cache:
+            flags_to_note(int(flag))
+    
+    # 使用pandas的map方法，比apply稍快，且可以利用缓存
+    notes = pd.Series(scenario_flags).map(note_cache).values
 
     # 添加备注列
     df[note_col] = notes
 
-    # 创建完整数据副本
+    # 创建完整数据副本（避免修改原始df）
     full_df = df.copy()
 
     # 创建重复数据（备注不是"无重复"的行）
-    duplicates_df = df[df[note_col] != "无重复"].copy()
+    # 使用布尔索引，更高效
+    duplicates_mask = df[note_col] != "无重复"
+    duplicates_df = df[duplicates_mask].copy()
 
     # 保存完整文件
     full_df.to_excel(output_full_path, index=False)
